@@ -597,18 +597,23 @@ impl Iterator for ResponseIterator {
 #[derive(Debug)]
 pub(crate) struct GlobalResponseIterator {
     messages: Arc<Receiver<ResponseMessage>>,
+    timeout: Duration,
 }
 
 impl GlobalResponseIterator {
     pub fn new(messages: Arc<Receiver<ResponseMessage>>) -> Self {
-        Self { messages }
+        Self { messages, timeout: Duration::from_secs(5) }
+    }
+
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
     }
 }
 
 impl Iterator for GlobalResponseIterator {
     type Item = ResponseMessage;
     fn next(&mut self) -> Option<Self::Item> {
-        match self.messages.recv_timeout(Duration::from_secs(5)) {
+        match self.messages.recv_timeout(self.timeout) {
             Err(err) => {
                 info!("timeout receiving packet: {err}");
                 None

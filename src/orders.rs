@@ -1,6 +1,6 @@
 use std::convert::From;
 use std::fmt::{self, Debug};
-
+use std::time::Duration;
 use log::{error, info};
 
 use crate::client::transport::{GlobalResponseIterator, ResponseIterator};
@@ -1487,8 +1487,8 @@ pub(crate) fn auto_open_orders(client: &Client, auto_bind: bool) -> Result<Order
     let message = encoders::encode_auto_open_orders(auto_bind)?;
 
     // TODO this should probably not timeout.
-    let messages = client.request_order_data(message)?;
-
+    let mut messages = client.request_order_data(message)?;
+    messages.set_timeout(Duration::from_secs(3600));
     Ok(OrderDataIterator {
         server_version: client.server_version(),
         messages,

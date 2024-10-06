@@ -103,6 +103,8 @@
 //! }
 //!```
 
+#![allow(dead_code)]
+
 /// Describes items present in an account.
 pub mod accounts;
 
