@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use crossbeam::channel::{self, Receiver, Sender};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 
 use crate::messages::IncomingMessages;
 use crate::messages::{RequestMessage, ResponseMessage};
@@ -422,7 +422,7 @@ fn process_orders(
                     }
                 }
                 _ => {
-                    error!("could not route message {message:?}");
+                    warn!("could not route message {message:?}");
                 }
             }
         }
@@ -440,7 +440,7 @@ fn process_orders(
                     }
                 }
                 _ => {
-                    error!("could not route message {message:?}");
+                    warn!("could not route message {message:?}");
                 }
             }
         }
@@ -501,7 +501,7 @@ impl<K: std::hash::Hash + Eq + std::fmt::Debug, V: std::fmt::Debug> SenderHash<K
                 error!("error sending: {id:?}, {err}")
             }
         } else {
-            error!("no recipient found for: {id:?}, {message:?}")
+            warn!("no recipient found for: {id:?}, {message:?}")
         }
         Ok(())
     }
