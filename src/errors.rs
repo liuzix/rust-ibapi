@@ -14,6 +14,9 @@ pub enum Error {
     Parse(usize, String, String),
     ServerVersion(i32, i32, String),
     Simple(String),
+
+    // Broken pipe
+    BrokenPipe,
 }
 
 impl std::error::Error for Error {}
@@ -31,6 +34,7 @@ impl std::fmt::Display for Error {
             Error::ServerVersion(wanted, have, message) => write!(f, "server version {wanted} required, got {have}: {message}"),
 
             Error::Simple(ref err) => write!(f, "error occurred: {err}"),
+            Error::BrokenPipe => write!(f, "broken pipe"),
         }
     }
 }

@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::io::{prelude::*, Cursor};
 use std::iter::Iterator;
 use std::net::TcpStream;
+use std::ptr::read;
 use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use crossbeam::channel::{self, Receiver, Sender};
-use log::{debug, error, info, warn};
+use crossbeam::channel::{self, Receiver, RecvTimeoutError, Sender};
+use log::{debug, error, info, log, warn};
 
 use crate::messages::IncomingMessages;
 use crate::messages::{RequestMessage, ResponseMessage};
@@ -43,9 +44,9 @@ pub(crate) trait MessageBus: Send + Sync {
 
 #[derive(Debug)]
 pub struct TcpMessageBus {
-    reader: Arc<TcpStream>,
-    writer: Arc<Mutex<TcpStream>>,
-    handles: Vec<JoinHandle<i32>>,
+    reader: Option<TcpStream>,
+    writer: Mutex<TcpStream>,
+    handles: Vec<JoinHandle<()>>,
     requests: Arc<SenderHash<i32, ResponseMessage>>,
     orders: Arc<SenderHash<i32, ResponseMessage>>,
     recorder: MessageRecorder,
@@ -61,15 +62,15 @@ pub enum Signal {
 
 #[derive(Debug)]
 struct GlobalChannels {
-    order_ids_in: Arc<Sender<ResponseMessage>>,
+    order_ids_in: Arc<RwLock<Option<Sender<ResponseMessage>>>>,
     order_ids_out: Arc<Receiver<ResponseMessage>>,
-    open_orders_in: Arc<Sender<ResponseMessage>>,
+    open_orders_in: Arc<RwLock<Option<Sender<ResponseMessage>>>>,
     open_orders_out: Arc<Receiver<ResponseMessage>>,
-    send_market_rule: Arc<Sender<ResponseMessage>>,
+    send_market_rule: Arc<RwLock<Option<Sender<ResponseMessage>>>>,
     recv_market_rule: Arc<Receiver<ResponseMessage>>,
-    send_positions: Arc<Sender<ResponseMessage>>,
+    send_positions: Arc<RwLock<Option<Sender<ResponseMessage>>>>,
     recv_positions: Arc<Receiver<ResponseMessage>>,
-    send_family_codes: Arc<Sender<ResponseMessage>>,
+    send_family_codes: Arc<RwLock<Option<Sender<ResponseMessage>>>>,
     recv_family_codes: Arc<Receiver<ResponseMessage>>,
 }
 
@@ -82,15 +83,15 @@ impl GlobalChannels {
         let (send_family_codes, recv_family_codes) = channel::unbounded();
 
         GlobalChannels {
-            order_ids_in: Arc::new(order_ids_in),
+            order_ids_in: Arc::new(RwLock::new(Some(order_ids_in))),
             order_ids_out: Arc::new(order_ids_out),
-            open_orders_in: Arc::new(open_orders_in),
+            open_orders_in: Arc::new(RwLock::new(Some(open_orders_in))),
             open_orders_out: Arc::new(open_orders_out),
-            send_market_rule: Arc::new(send_market_rule),
+            send_market_rule: Arc::new(RwLock::new(Some(send_market_rule))),
             recv_market_rule: Arc::new(recv_market_rule),
-            send_positions: Arc::new(send_positions),
+            send_positions: Arc::new(RwLock::new(Some(send_positions))),
             recv_positions: Arc::new(recv_positions),
-            send_family_codes: Arc::new(send_family_codes),
+            send_family_codes: Arc::new(RwLock::new(Some(send_family_codes))),
             recv_family_codes: Arc::new(recv_family_codes),
         }
     }
@@ -101,8 +102,8 @@ impl TcpMessageBus {
     pub fn connect(connection_string: &str) -> Result<TcpMessageBus, Error> {
         let stream = TcpStream::connect(connection_string)?;
 
-        let reader = Arc::new(stream.try_clone()?);
-        let writer = Arc::new(Mutex::new(stream));
+        let reader = Some(stream.try_clone()?);
+        let writer = Mutex::new(stream);
         let requests = Arc::new(SenderHash::new());
         let orders = Arc::new(SenderHash::new());
 
@@ -134,9 +135,19 @@ impl TcpMessageBus {
 
 const UNSPECIFIED_REQUEST_ID: i32 = -1;
 
+impl Drop for TcpMessageBus {
+    fn drop(&mut self) {
+        warn!("dropping TcpMessageBus");
+        self.writer.lock().unwrap().shutdown(std::net::Shutdown::Both).unwrap();
+        for handle in self.handles.drain(..) {
+            handle.join().unwrap();
+        }
+    }
+}
+
 impl MessageBus for TcpMessageBus {
     fn read_message(&mut self) -> Result<ResponseMessage, Error> {
-        read_packet(&self.reader)
+        read_packet(self.reader.as_ref().unwrap())
     }
 
     fn send_generic_message(&mut self, request_id: i32, packet: &RequestMessage) -> Result<ResponseIterator, Error> {
@@ -228,7 +239,7 @@ impl MessageBus for TcpMessageBus {
     }
 
     fn process_messages(&mut self, server_version: i32) -> Result<(), Error> {
-        let reader = Arc::clone(&self.reader);
+        let reader = self.reader.take().unwrap();
         let requests = Arc::clone(&self.requests);
         let recorder = self.recorder.clone();
         let orders = Arc::clone(&self.orders);
@@ -243,7 +254,8 @@ impl MessageBus for TcpMessageBus {
                 }
                 Err(err) => {
                     error!("error reading packet: {:?}", err);
-                    continue;
+                    abort_all(&requests, &orders, &globals, &executions);
+                    return;
                 }
             };
 
@@ -272,10 +284,26 @@ impl MessageBus for TcpMessageBus {
             }
         });
 
-        self.handles.push(handle);
+        //self.handles.push(handle);
 
         Ok(())
     }
+}
+
+fn abort_all(
+    requests: &Arc<crate::client::transport::SenderHash<i32, ResponseMessage>>,
+    orders: &Arc<crate::client::transport::SenderHash<i32, ResponseMessage>>,
+    globals: &Arc<GlobalChannels>,
+    executions: &crate::client::transport::SenderHash<String, ResponseMessage>,
+) {
+    requests.clear();
+    orders.clear();
+    executions.clear();
+    globals.order_ids_in.write().unwrap().take();
+    globals.open_orders_in.write().unwrap().take();
+    globals.send_market_rule.write().unwrap().take();
+    globals.send_positions.write().unwrap().take();
+    globals.send_family_codes.write().unwrap().take();
 }
 
 fn dispatch_message(
@@ -297,16 +325,16 @@ fn dispatch_message(
             }
         }
         IncomingMessages::NextValidId => {
-            globals.order_ids_in.send(message).unwrap();
+            globals.order_ids_in.read().unwrap().as_ref().unwrap().send(message).unwrap();
         }
         IncomingMessages::MarketRule => {
-            globals.send_market_rule.send(message).unwrap();
+            globals.send_market_rule.read().unwrap().as_ref().unwrap().send(message).unwrap();
         }
         IncomingMessages::Position | IncomingMessages::PositionEnd => {
-            globals.send_positions.send(message).unwrap();
+            globals.send_positions.read().unwrap().as_ref().unwrap().send(message).unwrap();
         }
         IncomingMessages::FamilyCodes => {
-            globals.send_family_codes.send(message).unwrap();
+            globals.send_family_codes.read().unwrap().as_ref().unwrap().send(message).unwrap();
         }
 
         IncomingMessages::ManagedAccounts => process_managed_accounts(server_version, message),
@@ -450,23 +478,23 @@ fn process_orders(
                     if let Err(e) = orders.send(&order_id, message) {
                         error!("error routing message for order_id({order_id}): {e}");
                     }
-                } else if let Err(e) = globals.open_orders_in.send(message) {
+                } else if let Err(e) = globals.open_orders_in.read().unwrap().as_ref().unwrap().send(message) {
                     error!("error sending IncomingMessages::OpenOrder: {e}");
                 }
             }
         }
         IncomingMessages::CompletedOrder => {
-            if let Err(e) = globals.open_orders_in.send(message) {
+            if let Err(e) = globals.open_orders_in.read().unwrap().as_ref().unwrap().send(message) {
                 error!("error sending IncomingMessages::CompletedOrder: {e}");
             }
         }
         IncomingMessages::OpenOrderEnd => {
-            if let Err(e) = globals.open_orders_in.send(message) {
+            if let Err(e) = globals.open_orders_in.read().unwrap().as_ref().unwrap().send(message) {
                 error!("error sending IncomingMessages::OpenOrderEnd: {e}");
             }
         }
         IncomingMessages::CompletedOrdersEnd => {
-            if let Err(e) = globals.open_orders_in.send(message) {
+            if let Err(e) = globals.open_orders_in.read().unwrap().as_ref().unwrap().send(message) {
                 error!("error sending IncomingMessages::CompletedOrdersEnd: {e}");
             }
         }
@@ -529,6 +557,11 @@ impl<K: std::hash::Hash + Eq + std::fmt::Debug, V: std::fmt::Debug> SenderHash<K
     pub fn len(&self) -> usize {
         let senders = self.data.read().unwrap();
         senders.len()
+    }
+
+    pub fn clear(&self) {
+        let mut senders = self.data.write().unwrap();
+        senders.clear();
     }
 }
 
@@ -598,11 +631,12 @@ impl Iterator for ResponseIterator {
 pub(crate) struct GlobalResponseIterator {
     messages: Arc<Receiver<ResponseMessage>>,
     timeout: Duration,
+    pub(crate) error: Option<Error>,
 }
 
 impl GlobalResponseIterator {
     pub fn new(messages: Arc<Receiver<ResponseMessage>>) -> Self {
-        Self { messages, timeout: Duration::from_secs(5) }
+        Self { messages, timeout: Duration::from_secs(5), error: None }
     }
 
     pub fn set_timeout(&mut self, timeout: Duration) {
@@ -613,9 +647,20 @@ impl GlobalResponseIterator {
 impl Iterator for GlobalResponseIterator {
     type Item = ResponseMessage;
     fn next(&mut self) -> Option<Self::Item> {
+        fail::fail_point!("GlobalResponseIteratorNext", |_| {
+            error!("failpoint triggered GlobalResponseIteratorNext");
+            self.error = Some(Error::BrokenPipe);
+            None
+        });
         match self.messages.recv_timeout(self.timeout) {
-            Err(err) => {
-                info!("timeout receiving packet: {err}");
+            Err(RecvTimeoutError::Timeout) => {
+                info!("timeout receiving packet");
+                self.error = Some(Error::Simple("timeout".to_string()));
+                None
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                error!("disconnected receiving packet");
+                self.error = Some(Error::BrokenPipe);
                 None
             }
             Ok(message) => Some(message),

@@ -1407,9 +1407,15 @@ pub enum OrderDataResult {
 }
 
 /// Supports iteration over [OrderDataResult].
-pub(crate) struct OrderDataIterator {
+pub struct OrderDataIterator {
     server_version: i32,
     messages: GlobalResponseIterator,
+}
+
+impl OrderDataIterator {
+    pub fn get_error(self) -> Option<Error> {
+        self.messages.error
+    }
 }
 
 impl Iterator for OrderDataIterator {

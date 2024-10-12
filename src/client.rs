@@ -17,7 +17,7 @@ use crate::market_data::historical;
 use crate::market_data::realtime::{self, Bar, BarSize, WhatToShow};
 use crate::messages::RequestMessage;
 use crate::messages::{IncomingMessages, OutgoingMessages};
-use crate::orders::{Order, OrderDataResult, OrderNotification};
+use crate::orders::{Order, OrderDataIterator, OrderDataResult, OrderNotification};
 use crate::{accounts, contracts, orders, server_versions};
 
 pub(crate) mod transport;
@@ -40,7 +40,7 @@ pub struct Client {
 
     managed_accounts: String,
     client_id: i32, // ID of client.
-    pub(crate) message_bus: Arc<Mutex<dyn MessageBus>>,
+    pub(crate) message_bus: Box<Mutex<dyn MessageBus>>,
     next_request_id: AtomicI32, // Next available request_id.
     order_id: AtomicI32,        // Next available order_id. Starts with value returned on connection.
 }
@@ -67,11 +67,11 @@ impl Client {
     /// println!("next_order_id: {}", client.next_order_id());
     /// ```
     pub fn connect(address: &str, client_id: i32) -> Result<Client, Error> {
-        let message_bus = Arc::new(Mutex::new(TcpMessageBus::connect(address)?));
+        let message_bus = Box::new(Mutex::new(TcpMessageBus::connect(address)?));
         Client::do_connect(client_id, message_bus)
     }
 
-    fn do_connect(client_id: i32, message_bus: Arc<Mutex<dyn MessageBus>>) -> Result<Client, Error> {
+    fn do_connect(client_id: i32, message_bus: Box<Mutex<dyn MessageBus>>) -> Result<Client, Error> {
         let mut client = Client {
             server_version: 0,
             connection_time: None,
@@ -321,7 +321,7 @@ impl Client {
     ///    println!("{order_data:?}")
     /// }
     /// ```
-    pub fn auto_open_orders(&self, auto_bind: bool) -> Result<impl Iterator<Item = orders::OrderDataResult>, Error> {
+    pub fn auto_open_orders(&self, auto_bind: bool) -> Result<OrderDataIterator, Error> {
         orders::auto_open_orders(self, auto_bind)
     }
 
@@ -365,7 +365,7 @@ impl Client {
     ///    println!("{order_data:?}")
     /// }
     /// ```
-    pub fn completed_orders(&self, api_only: bool) -> Result<impl Iterator<Item = orders::OrderDataResult>, Error> {
+    pub fn completed_orders(&self, api_only: bool) -> Result<OrderDataIterator, Error> {
         orders::completed_orders(self, api_only)
     }
 
@@ -446,7 +446,7 @@ impl Client {
     ///    println!("{order_data:?}")
     /// }
     /// ```
-    pub fn open_orders(&self) -> Result<impl Iterator<Item = OrderDataResult>, Error> {
+    pub fn open_orders(&self) -> Result<OrderDataIterator, Error> {
         orders::open_orders(self)
     }
 
@@ -890,7 +890,7 @@ impl Client {
     // == Internal Use ==
 
     #[cfg(test)]
-    pub(crate) fn stubbed(message_bus: Arc<Mutex<dyn MessageBus>>, server_version: i32) -> Client {
+    pub(crate) fn stubbed(message_bus: Box<Mutex<dyn MessageBus>>, server_version: i32) -> Client {
         Client {
             server_version: server_version,
             connection_time: None,
@@ -967,7 +967,7 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        info!("dropping basic client")
+        info!("dropping basic client");
     }
 }
 
